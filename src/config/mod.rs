@@ -41,6 +41,10 @@ pub struct AppConfig {
     pub theme_dark: Option<String>,
     pub theme_light: Option<String>,
     pub appearance: Option<String>,
+    /// Reverse the inline commit selector's display: `false` (default) shows
+    /// the head end on top, `true` shows the base end on top (parent → child),
+    /// like `git log --reverse`. Overridden by the `--reverse` CLI flag.
+    pub reverse: Option<bool>,
     pub backend: Option<String>,
     pub comment_types: Option<Vec<CommentTypeConfig>>,
     pub show_file_list: Option<bool>,
@@ -80,6 +84,7 @@ const KNOWN_KEYS: &[&str] = &[
     "theme_dark",
     "theme_light",
     "appearance",
+    "reverse",
     "backend",
     "comment_types",
     "show_file_list",
@@ -309,6 +314,7 @@ fn load_config_from_path(path: &Path) -> Result<ConfigLoadOutcome> {
         no_update_check: read_bool(table, "no_update_check", &mut warnings),
         single_file_view: read_bool(table, "single_file_view", &mut warnings),
         username: read_string(table, "username", &mut warnings),
+        reverse: read_bool(table, "reverse", &mut warnings),
         forge: table
             .get("forge")
             .and_then(|v| parse_forge(v, &mut warnings)),
@@ -585,6 +591,27 @@ mod tests {
         assert_eq!(cfg.theme_light.as_deref(), Some("gruvbox-light"));
         assert_eq!(cfg.appearance.as_deref(), Some("system"));
         assert!(outcome.warnings.is_empty());
+    }
+
+    #[test]
+    fn should_load_valid_reverse_without_warning() {
+        let outcome = parse_config("reverse = true\n");
+        assert_eq!(
+            outcome.config.as_ref().and_then(|cfg| cfg.reverse),
+            Some(true)
+        );
+        assert!(outcome.warnings.is_empty());
+    }
+
+    #[test]
+    fn should_warn_and_drop_invalid_reverse() {
+        let outcome = parse_config("reverse = \"yes\"\n");
+        assert_eq!(outcome.config.as_ref().and_then(|cfg| cfg.reverse), None);
+        assert!(
+            outcome.warnings.iter().any(|w| w.contains("reverse")),
+            "expected a warning naming reverse, got {:?}",
+            outcome.warnings
+        );
     }
 
     #[test]

@@ -18,6 +18,8 @@ pub struct CliArgs {
     pub output_to_stdout: bool,
     /// Skip checking for updates on startup.
     pub no_update_check: bool,
+    /// Reverse the inline commit selector's display (like `git log --reverse`).
+    pub reverse: bool,
     /// Commit/revision range to review.
     pub revisions: Option<String>,
     /// Skip commit selector and review uncommitted changes directly.
@@ -118,6 +120,12 @@ struct TuiOptions {
     /// Skip checking for updates on startup.
     #[arg(long = "no-update-check", action = ArgAction::SetTrue)]
     no_update_check: bool,
+
+    /// Reverse the inline commit selector's order, showing the base end first
+    /// (parent → child), like `git log --reverse`. Sets the `reverse` config
+    /// key for this run. The diff and head/base roles are unaffected.
+    #[arg(long = "reverse", action = ArgAction::SetTrue)]
+    reverse: bool,
 
     /// Override the GitHub repo for PR operations (HTTPS, SCP-style SSH,
     /// or ssh:// URLs accepted).
@@ -282,6 +290,7 @@ impl From<Cli> for CliArgs {
             appearance: options.appearance,
             output_to_stdout: options.stdout,
             no_update_check: options.no_update_check,
+            reverse: options.reverse,
             revisions: options.revisions,
             working_tree: options.working_tree,
             path_filter: options.path_filter,
@@ -306,6 +315,7 @@ impl TuiOptions {
             || self.file_path.is_some()
             || self.all_files
             || self.repo_url.is_some()
+            || self.reverse
     }
 
     fn merge(self, later: TuiOptions) -> Self {
@@ -314,6 +324,7 @@ impl TuiOptions {
             appearance: later.appearance.or(self.appearance),
             stdout: self.stdout || later.stdout,
             no_update_check: self.no_update_check || later.no_update_check,
+            reverse: self.reverse || later.reverse,
             revisions: later.revisions.or(self.revisions),
             working_tree: self.working_tree || later.working_tree,
             path_filter: later.path_filter.or(self.path_filter),

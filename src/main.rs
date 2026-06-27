@@ -147,6 +147,16 @@ fn main() -> anyhow::Result<()> {
         DiffWhitespaceMode::Normal
     };
 
+    // Resolve whether to reverse the commit selector up front so it can be
+    // threaded into construction; the selector then places its initial cursor
+    // in the final order rather than head-first-then-repaired. `--reverse` on
+    // the CLI forces it on; otherwise fall back to the config `reverse` value.
+    let reverse = cli_args.reverse
+        || config_outcome
+            .config
+            .as_ref()
+            .and_then(|cfg| cfg.reverse)
+            .unwrap_or(false);
     let mut app = match profile::time("startup.app_init", || {
         App::new(
             theme,
@@ -168,6 +178,7 @@ fn main() -> anyhow::Result<()> {
                     .repo_url
                     .as_deref()
                     .and_then(tuicr::forge::github::gh::parse_github_remote_url),
+                reverse,
             },
         )
     }) {
@@ -277,6 +288,8 @@ fn main() -> anyhow::Result<()> {
         if let Some(interval_ms) = cfg.review_watch_interval_ms {
             app.set_review_watch_interval_ms(interval_ms as u64);
         }
+        // `commit_order` is applied during construction via AppStartupOptions
+        // (threaded into App::new), so no post-construction fix-up is needed.
     }
 
     // On narrow terminals, start with only the diff panel visible.

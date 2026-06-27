@@ -74,6 +74,23 @@ pub fn head_side_of(index: usize) -> Option<SelectionRange> {
     (index > 0).then(|| (0, index - 1))
 }
 
+/// Convert between a storage position (head-end first) and its display row, for
+/// a list of `n` rows. When `reverse` is false the stored order is shown as-is
+/// (storage index `0` on top) — tuicr's historical default; when true the walk
+/// is shown reversed (base end on top, parent → child top-to-bottom). The
+/// mapping is an involution, so the same call converts storage→row and
+/// row→storage.
+///
+/// This is presentation/navigation only — it never affects the persisted
+/// selection indices, the diff, or the head/base roles.
+pub fn display_position(pos: usize, n: usize, reverse: bool) -> usize {
+    if reverse {
+        n.saturating_sub(1).saturating_sub(pos)
+    } else {
+        pos
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +134,22 @@ mod tests {
         assert_eq!(head_side_of(0), None);
         assert_eq!(head_side_of(1), Some((0, 0)));
         assert_eq!(head_side_of(3), Some((0, 2)));
+    }
+
+    #[test]
+    fn display_position_is_identity_when_not_reversed() {
+        for i in 0..5 {
+            assert_eq!(display_position(i, 5, false), i);
+        }
+    }
+
+    #[test]
+    fn display_position_reverses_and_is_involution() {
+        assert_eq!(display_position(0, 5, true), 4);
+        assert_eq!(display_position(4, 5, true), 0);
+        for i in 0..5 {
+            let row = display_position(i, 5, true);
+            assert_eq!(display_position(row, 5, true), i);
+        }
     }
 }

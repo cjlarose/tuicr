@@ -183,12 +183,11 @@ fn render_local_target_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     let total_commits = app.commit_list.len();
     let visible_count = app.visible_commit_count.min(total_commits);
 
-    let mut items: Vec<Line> = app
-        .commit_list
-        .iter()
-        .take(visible_count)
-        .enumerate()
-        .map(|(i, commit)| {
+    let reverse = app.effective_commit_reversed();
+    let mut items: Vec<Line> = (0..visible_count)
+        .map(|row| {
+            let i = crate::commit_order::display_position(row, visible_count, reverse);
+            let commit = &app.commit_list[i];
             render_commit_row(&CommitRowSpec {
                 commit,
                 is_cursor: i == app.commit_list_cursor,
