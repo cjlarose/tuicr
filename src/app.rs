@@ -388,7 +388,7 @@ struct SinceLastReviewSelection {
 }
 
 fn commits_since_last_review_selection(
-    commits_newest_first: &[crate::forge::traits::PullRequestCommit],
+    commits_head_first: &[crate::forge::traits::PullRequestCommit],
     review_metadata: &crate::forge::traits::PullRequestReviewMetadata,
 ) -> Option<SinceLastReviewSelection> {
     let viewer = review_metadata.viewer_login.as_deref()?;
@@ -405,11 +405,11 @@ fn commits_since_last_review_selection(
         .max_by(|a, b| a.submitted_at.cmp(&b.submitted_at))?;
 
     let reviewed_commit = last_review.commit_oid.as_deref()?;
-    let reviewed_index = commits_newest_first
+    let reviewed_index = commits_head_first
         .iter()
         .position(|commit| commit.oid == reviewed_commit)?;
 
-    let Some(range) = crate::commit_order::newer_than(reviewed_index) else {
+    let Some(range) = crate::commit_order::head_side_of(reviewed_index) else {
         return Some(SinceLastReviewSelection {
             range: None,
             reviewed_index,
@@ -1237,15 +1237,17 @@ pub struct App {
     pub pending_count: Option<usize>,
 
     // Inline commit selector state (shown at top of diff view for multi-commit reviews)
-    /// CommitInfo for commits in the current review (display order: newest first)
+    /// CommitInfo for the current review's commits, in selector storage order
+    /// (head-end first).
     pub review_commits: Vec<CommitInfo>,
-    /// Forge-side commit list for the active PR (display order: newest first).
-    /// Empty outside PR mode. Used as the source of truth for resolving a
-    /// `commit_selection_range` back to (start_sha, end_sha) when toggling.
+    /// Forge-side commit list for the active PR, in selector storage order
+    /// (head-end first). Empty outside PR mode. Used as the source of truth for
+    /// resolving a `commit_selection_range` back to (base_sha, head_sha) when
+    /// toggling.
     pub pr_commits: Vec<crate::forge::traits::PullRequestCommit>,
-    /// Index in `pr_commits`/`review_commits` of the newest commit covered
-    /// by the viewer's latest submitted review. Commits at this index and
-    /// older get a reviewed marker in the inline selector.
+    /// Index in `pr_commits`/`review_commits` of the head-most commit covered
+    /// by the viewer's latest submitted review. Commits at this index and on
+    /// its base side get a reviewed marker in the inline selector.
     pub pr_last_reviewed_commit_index: Option<usize>,
     /// In-flight range re-fetch driven by toggling commits in the inline
     /// selector while in PR mode. Drives a spinner in the status bar.
@@ -1698,7 +1700,7 @@ impl App {
                 || vcs.get_commits_info(&commit_ids),
                 profile_commit_result,
             )?;
-            // Store newest-first (see `commit_order`).
+            // Store head-end first (see `commit_order`).
             let review_commits: Vec<CommitInfo> =
                 crate::commit_order::into_storage_order(review_commits);
 
@@ -2565,11 +2567,11 @@ impl App {
         vcs_info: &VcsInfo,
         commit_ids: &[String],
     ) -> ReviewSession {
-        let newest_commit_id = commit_ids.last().unwrap().clone();
+        let head_commit_id = commit_ids.last().unwrap().clone();
         let loaded = load_latest_session_for_context(
             &vcs_info.root_path,
             vcs_info.branch_name.as_deref(),
-            &newest_commit_id,
+            &head_commit_id,
             SessionDiffSource::CommitRange,
             Some(commit_ids),
         )
@@ -2579,7 +2581,7 @@ impl App {
         let mut session = loaded.unwrap_or_else(|| {
             let mut s = ReviewSession::new(
                 vcs_info.root_path.clone(),
-                newest_commit_id,
+                head_commit_id,
                 vcs_info.branch_name.clone(),
                 SessionDiffSource::CommitRange,
             );
@@ -2598,11 +2600,11 @@ impl App {
         vcs_info: &VcsInfo,
         commit_ids: &[String],
     ) -> ReviewSession {
-        let newest_commit_id = commit_ids.last().unwrap().clone();
+        let head_commit_id = commit_ids.last().unwrap().clone();
         let loaded = load_latest_session_for_context(
             &vcs_info.root_path,
             vcs_info.branch_name.as_deref(),
-            &newest_commit_id,
+            &head_commit_id,
             SessionDiffSource::StagedUnstagedAndCommits,
             Some(commit_ids),
         )
@@ -2612,7 +2614,7 @@ impl App {
         let mut session = loaded.unwrap_or_else(|| {
             let mut s = ReviewSession::new(
                 vcs_info.root_path.clone(),
-                newest_commit_id,
+                head_commit_id,
                 vcs_info.branch_name.clone(),
                 SessionDiffSource::StagedUnstagedAndCommits,
             );
@@ -3129,11 +3131,12 @@ impl App {
         let _ = self.save_current_session_merging_external();
     }
 
-    /// Resolve the active inline selection (PR mode) to (start_sha,
-    /// end_sha). `start_sha` is the parent of the *oldest* selected
-    /// commit; `end_sha` is the *newest*. Because `pr_commits` is stored
-    /// newest-first, the oldest selected commit is at `range.1` and the
-    /// newest at `range.0`.
+    /// Resolve the active inline selection (PR mode) to (base_sha,
+    /// head_sha). `base_sha` is the diff base — the commit just past the
+    /// base end of the selection; `head_sha` is the selection's head
+    /// commit. Because `pr_commits` is stored head-end first, the
+    /// selection's head commit is at `range.0` and its base-side commit at
+    /// `range.1`.
     ///
     /// Returns `None` outside PR mode, when the selection is empty, or
     /// when the resolved parent isn't available — in that case the
@@ -3147,19 +3150,20 @@ impl App {
         if self.pr_commits.is_empty() || start_idx > end_idx || end_idx >= self.pr_commits.len() {
             return None;
         }
-        let newest = self
+        let head = self
             .pr_commits
             .get(crate::commit_order::head_index(range))?;
-        // Parent of the oldest selected commit. If the oldest selected commit
-        // is the PR's first commit (oldest commit overall, at the bottom of
-        // the list), its parent is the PR's base SHA.
-        let parent_index = crate::commit_order::parent_index(range);
-        let parent_sha = if parent_index < self.pr_commits.len() {
-            self.pr_commits[parent_index].oid.clone()
+        // The diff base is the commit just past the base end of the
+        // selection. If the selection already reaches the base end of the
+        // walk, there is no such commit and the diff base is the PR's base
+        // SHA.
+        let base_boundary = crate::commit_order::base_boundary_index(range);
+        let base_sha = if base_boundary < self.pr_commits.len() {
+            self.pr_commits[base_boundary].oid.clone()
         } else {
             pr.base_sha.clone()
         };
-        Some((parent_sha, newest.oid.clone()))
+        Some((base_sha, head.oid.clone()))
     }
 
     /// Reload the PR diff for the currently selected inline commit
@@ -7467,8 +7471,8 @@ impl App {
         // anchor to the displayed (subset) diff, so `commit_id` must be the
         // SHA the diff was computed against — otherwise GitHub rejects with
         // 422 because the line/position isn't present in the diff against
-        // the cumulative PR head. `pr_commits` is stored newest-first, so
-        // the head of a (start_idx..=end_idx) range is `pr_commits[start_idx]`.
+        // the cumulative PR head. `pr_commits` is stored head-end first, so
+        // the head commit of a selection is at `head_index(range)`.
         let commit_id = match self.commit_selection_range {
             Some(range)
                 if !self.pr_commits.is_empty()
@@ -9022,9 +9026,9 @@ impl App {
             }
         };
 
-        // Collect selected entries in chronological (oldest→newest) order.
+        // Collect the selected commits in base→head order (diff input order).
         let selected_commits: Vec<CommitInfo> =
-            crate::commit_order::chronological_indices((start, end))
+            crate::commit_order::base_to_head_indices((start, end))
                 .filter_map(|i| self.commit_list.get(i))
                 .cloned()
                 .collect();
@@ -9073,12 +9077,12 @@ impl App {
             return Ok(());
         }
 
-        // Update session with the newest commit as base
-        let newest_commit_id = selected_ids.last().unwrap().clone();
+        // Key the session by the selection's head commit (last in base→head order).
+        let head_commit_id = selected_ids.last().unwrap().clone();
         let loaded_session = load_latest_session_for_context(
             &self.vcs_info.root_path,
             self.vcs_info.branch_name.as_deref(),
-            &newest_commit_id,
+            &head_commit_id,
             SessionDiffSource::CommitRange,
             Some(selected_ids.as_slice()),
         )
@@ -9088,7 +9092,7 @@ impl App {
         let mut session = loaded_session.unwrap_or_else(|| {
             let mut session = ReviewSession::new(
                 self.vcs_info.root_path.clone(),
-                newest_commit_id,
+                head_commit_id,
                 self.vcs_info.branch_name.clone(),
                 SessionDiffSource::CommitRange,
             );
@@ -9118,7 +9122,7 @@ impl App {
         self.diff_state = DiffState::default();
         self.file_list_state = FileListState::default();
 
-        // Set up inline commit selector for multi-commit reviews (newest-first display order)
+        // Set up inline commit selector for multi-commit reviews (head-end-first storage)
         self.pr_commits.clear();
         self.pr_last_reviewed_commit_index = None;
         self.review_commits = crate::commit_order::into_storage_order(selected_commits);
@@ -9196,7 +9200,7 @@ impl App {
                 .get(i)
                 .is_some_and(Self::is_unstaged_commit)
         });
-        let selected_ids: Vec<String> = crate::commit_order::chronological_indices((start, end))
+        let selected_ids: Vec<String> = crate::commit_order::base_to_head_indices((start, end))
             .filter_map(|i| self.review_commits.get(i))
             .filter(|c| !Self::is_special_commit(c))
             .map(|c| c.id.clone())
@@ -9318,7 +9322,7 @@ impl App {
         self.diff_state = DiffState::default();
         self.file_list_state = FileListState::default();
 
-        // Set up inline commit selector (newest-first display order)
+        // Set up inline commit selector (head-end-first storage)
         self.pr_commits.clear();
         self.pr_last_reviewed_commit_index = None;
         self.review_commits = crate::commit_order::into_storage_order(selected_commits);
@@ -9582,8 +9586,8 @@ impl App {
         match &self.diff_source {
             DiffSource::CommitRange(commits) => {
                 // When the inline commit selector narrows to a subrange,
-                // review_commits is newest-first so index `start` is the
-                // newest selected commit — that's the snapshot to read from.
+                // review_commits is stored head-end first, so index `start`
+                // is the head selected commit — that's the snapshot to read.
                 if let Some((start, _)) = self.commit_selection_range {
                     self.review_commits
                         .get(start)
@@ -11544,7 +11548,7 @@ index 1111111..2222222 100644
             test_pr_details(42, "multi-commit"),
             crate::forge::github::gh::tests_fixture::SIMPLE_PATCH.to_string(),
         );
-        // Forge returns oldest-first; pr_open reverses to newest-first.
+        // Forge yields base-end first; pr_open reverses to head-end-first storage.
         backend.commits = vec![
             sample_pr_commit("aaaaaaa1111", "first"),
             sample_pr_commit("bbbbbbb2222", "second"),
@@ -11553,7 +11557,7 @@ index 1111111..2222222 100644
         // when
         app.open_pr_with_backend(&summary, Box::new(backend), None)
             .unwrap();
-        // then — selector is visible and pr_commits is in newest-first order.
+        // then — selector is visible and pr_commits is in head-end-first order.
         assert!(app.show_commit_selector, "selector should be visible");
         assert_eq!(app.pr_commits.len(), 3);
         assert_eq!(app.pr_commits[0].summary, "third");
@@ -11607,18 +11611,18 @@ index 1111111..2222222 100644
         ];
         app.open_pr_with_backend(&summary, Box::new(backend), None)
             .unwrap();
-        // After open: pr_commits = [last, middle, first] (newest-first).
+        // After open: pr_commits = [last, middle, first] (head-end first).
         // Select only the middle commit (index 1).
         app.commit_selection_range = Some((1, 1));
         // when
         let pair = app.pr_range_sha_pair();
-        // then — start = parent (first), end = newest selected (middle).
+        // then — base = base boundary (first), head = head selected (middle).
         assert_eq!(pair, Some(("first11".to_string(), "middle2".to_string())));
     }
 
     #[test]
-    fn should_resolve_pr_range_to_pr_base_when_oldest_commit_selected() {
-        // given a multi-commit PR with only the oldest commit selected
+    fn should_resolve_pr_range_to_pr_base_when_base_end_commit_selected() {
+        // given a multi-commit PR with only the base-end commit selected
         let mut app = build_app();
         app.forge_repository = Some(ForgeRepository::github("github.com", "agavra", "tuicr"));
         app.pr_tab = PullRequestsTab::new(app.forge_repository.clone());
@@ -11636,7 +11640,7 @@ index 1111111..2222222 100644
         ];
         app.open_pr_with_backend(&summary, Box::new(backend), None)
             .unwrap();
-        // pr_commits = [second, first]. Select only the oldest (index 1).
+        // pr_commits = [second, first]. Select only the base-end commit (index 1).
         app.commit_selection_range = Some((1, 1));
         // when
         let pair = app.pr_range_sha_pair();
@@ -14930,7 +14934,7 @@ mod submit_flow_tests {
         use crate::forge::traits::PullRequestCommit;
 
         let mut app = make_pr_app_with_single_modified_file("src/lib.rs");
-        // Newest-first: [C3, C2, C1]. PR head SHA is C3 ("abcdef0123").
+        // Head-end first: [C3, C2, C1]. PR head SHA is C3 ("abcdef0123").
         app.pr_commits = vec![
             PullRequestCommit {
                 oid: "abcdef0123".to_string(),
@@ -14972,7 +14976,7 @@ mod submit_flow_tests {
         let state = app.submit_state.as_ref().expect("submit state");
         assert_eq!(
             state.commit_id, "deadbeef02",
-            "subset → commit_id should be the newest selected commit (start_idx), not the PR head",
+            "subset → commit_id should be the head selected commit (start_idx), not the PR head",
         );
     }
 

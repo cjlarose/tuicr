@@ -229,8 +229,9 @@ impl VcsBackend for JjBackend {
     }
 
     fn resolve_revision_range(&self, revisions: &str) -> Result<ResolvedRevisionRange<'static>> {
-        // Use jj log to resolve the revisions to commit IDs, reverse-chronological by default.
-        // We reverse the result so the oldest commit is first (matching get_commit_range_diff expectations).
+        // Use jj log to resolve the revisions to commit IDs; jj yields them head-end first
+        // by default. We reverse so the base (first) commit comes first, matching
+        // get_commit_range_diff's base→head expectation.
         let output = run_jj_command(
             &self.info.root_path,
             [

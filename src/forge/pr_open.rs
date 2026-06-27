@@ -31,7 +31,7 @@ pub struct OpenedPullRequest {
     pub diff_files: Vec<DiffFile>,
     pub session: ReviewSession,
     pub key: PrSessionKey,
-    /// PR commits in newest-first display order. Empty when the forge
+    /// PR commits in selector storage order (head-end first). Empty when the forge
     /// returned no commits (or the backend failed and we degraded
     /// gracefully — the cumulative diff stays usable).
     pub commits: Vec<PullRequestCommit>,
@@ -118,8 +118,8 @@ pub fn prepare_open_pr(
 
     let key = PrSessionKey::from_details(&details);
     let session = build_session(&details, &key, &diff_files);
-    // Forge returns commits oldest-first; the inline selector stores them
-    // newest-first (see `commit_order`).
+    // Forge yields commits base-end first; the selector stores them
+    // head-end first (see `commit_order`).
     let commits = crate::commit_order::into_storage_order(commits);
 
     Ok(OpenedPullRequest {

@@ -332,7 +332,7 @@ impl VcsBackend for GitCliBackend {
             return Err(TuicrError::NoChanges);
         }
 
-        let (base_rev, newest_rev) = match &revision_range.diff_target {
+        let (base_rev, head_rev) = match &revision_range.diff_target {
             RevisionDiffTarget::CommitList => (
                 parent_rev_or_empty(&self.root_path, &revision_range.commit_ids[0]),
                 revision_range.commit_ids.last().unwrap().clone(),
@@ -348,12 +348,12 @@ impl VcsBackend for GitCliBackend {
                 "--no-ext-diff".into(),
                 "--binary".into(),
                 base_rev.clone(),
-                newest_rev.clone(),
+                head_rev.clone(),
                 "--".into(),
             ],
             false,
             GitContentSource::Revision(&base_rev),
-            GitContentSource::Revision(&newest_rev),
+            GitContentSource::Revision(&head_rev),
             highlighter,
         )
     }

@@ -78,7 +78,7 @@ pub struct CommitInfo {
 /// do not need to keep passing the raw revision string through lower layers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedRevisionRange<'a> {
-    /// Commit IDs selected by the expression, oldest first.
+    /// Commit IDs selected by the expression, in base→head order (base first).
     pub commit_ids: Cow<'a, [String]>,
 
     /// Boundary to use when materializing the file diff for this range.
@@ -119,7 +119,7 @@ pub enum RevisionDiffTarget {
     /// reloading an active commit-range session,
     /// or a backend that only reports a resolved commit list.
     /// In this mode,
-    /// backends infer the old side from the oldest selected commit.
+    /// backends infer the old side from the base (first) selected commit.
     CommitList,
 
     /// Compare the resolved base revision to the resolved head revision.
@@ -261,7 +261,7 @@ pub trait VcsBackend: Send {
         Ok(Vec::new())
     }
 
-    /// Get a combined diff from the parent of the oldest commit through to the working tree.
+    /// Get a combined diff from the parent of the base (first) commit through to the working tree.
     /// This shows both committed and working tree changes in a single diff.
     /// Returns error if not supported (default).
     fn get_working_tree_with_commits_diff(

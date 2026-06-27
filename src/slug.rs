@@ -552,7 +552,7 @@ fn range_from(
     if range.is_empty() {
         return Err(SlugDeriveError::MissingCommitRange(diff_source));
     }
-    // `commit_range` is stored newest-first by the App layer.
+    // `commit_range` is stored head-end first by the App layer.
     let head = short_sha(&range[0]);
     let base = short_sha(&range[range.len() - 1]);
     Ok(CommitRange { base, head })
@@ -900,7 +900,7 @@ mod tests {
             Some(&range),
         )
         .unwrap();
-        // commit_range is newest-first: head = first, base = last (short SHAs)
+        // commit_range is stored head-end first: head = first, base = last (short SHAs)
         assert_eq!(
             slug.to_string(),
             "agavra/tuicr@main/commits/abc1234..def5678"
