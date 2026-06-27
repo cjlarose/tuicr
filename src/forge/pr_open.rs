@@ -118,10 +118,9 @@ pub fn prepare_open_pr(
 
     let key = PrSessionKey::from_details(&details);
     let session = build_session(&details, &key, &diff_files);
-    // Forge returns commits oldest-first; the inline selector renders
-    // newest-first so reverse here once.
-    let mut commits = commits;
-    commits.reverse();
+    // Forge returns commits oldest-first; the inline selector stores them
+    // newest-first (see `commit_order`).
+    let commits = crate::commit_order::into_storage_order(commits);
 
     Ok(OpenedPullRequest {
         details,

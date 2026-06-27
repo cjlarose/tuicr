@@ -1,6 +1,7 @@
 pub mod app;
 pub mod cli;
 pub mod comment_vim;
+pub mod commit_order;
 pub mod config;
 pub mod editor;
 pub mod error;

@@ -409,18 +409,18 @@ fn commits_since_last_review_selection(
         .iter()
         .position(|commit| commit.oid == reviewed_commit)?;
 
-    if reviewed_index == 0 {
+    let Some(range) = crate::commit_order::newer_than(reviewed_index) else {
         return Some(SinceLastReviewSelection {
             range: None,
             reviewed_index,
             message: "No commits since your last review".to_string(),
         });
-    }
+    };
 
     let count = reviewed_index;
     let noun = if count == 1 { "commit" } else { "commits" };
     Some(SinceLastReviewSelection {
-        range: Some((0, reviewed_index - 1)),
+        range: Some(range),
         reviewed_index,
         message: format!("Showing {count} {noun} since your last review — press Enter to see all"),
     })
@@ -1624,14 +1624,12 @@ impl App {
                     &vcs_info,
                     &commit_ids,
                 );
-                let review_commits: Vec<CommitInfo> = crate::profile::time_with(
-                    "startup.selected_commit_info",
-                    || vcs.get_commits_info(&commit_ids),
-                    profile_commit_result,
-                )?
-                .into_iter()
-                .rev()
-                .collect();
+                let review_commits: Vec<CommitInfo> =
+                    crate::commit_order::into_storage_order(crate::profile::time_with(
+                        "startup.selected_commit_info",
+                        || vcs.get_commits_info(&commit_ids),
+                        profile_commit_result,
+                    )?);
                 // Prepend staged/unstaged entries only when the backend supports them
                 let change_status = Self::get_change_status_with_ignore(
                     vcs.as_ref(),
@@ -1666,11 +1664,8 @@ impl App {
                 app.range_diff_files = Some(app.diff_files.clone());
                 app.commit_list = all_commits.clone();
                 app.commit_list_cursor = 0;
-                app.commit_selection_range = if all_commits.is_empty() {
-                    None
-                } else {
-                    Some((0, all_commits.len() - 1))
-                };
+                app.commit_selection_range =
+                    (!all_commits.is_empty()).then(|| crate::commit_order::full(all_commits.len()));
                 app.commit_list_scroll_offset = 0;
                 app.visible_commit_count = all_commits.len();
                 app.has_more_commit = false;
@@ -1700,8 +1695,9 @@ impl App {
                 || vcs.get_commits_info(&commit_ids),
                 profile_commit_result,
             )?;
-            // Reverse to newest-first display order
-            let review_commits: Vec<CommitInfo> = review_commits.into_iter().rev().collect();
+            // Store newest-first (see `commit_order`).
+            let review_commits: Vec<CommitInfo> =
+                crate::commit_order::into_storage_order(review_commits);
 
             let mut app = Self::build(
                 vcs,
@@ -1723,7 +1719,7 @@ impl App {
                 app.range_diff_files = Some(app.diff_files.clone());
                 app.commit_list = review_commits.clone();
                 app.commit_list_cursor = 0;
-                app.commit_selection_range = Some((0, review_commits.len() - 1));
+                app.commit_selection_range = Some(crate::commit_order::full(review_commits.len()));
                 app.commit_list_scroll_offset = 0;
                 app.visible_commit_count = review_commits.len();
                 app.has_more_commit = false;
@@ -2697,7 +2693,10 @@ impl App {
 
     fn is_strict_commit_selection(range: Option<(usize, usize)>, total: usize) -> bool {
         range.is_some_and(|(start, end)| {
-            total > 0 && start <= end && end < total && (start > 0 || end + 1 < total)
+            total > 0
+                && start <= end
+                && end < total
+                && !crate::commit_order::is_full((start, end), total)
         })
     }
 
@@ -2724,7 +2723,7 @@ impl App {
         self.has_more_commit = false;
         self.show_commit_selector = true;
 
-        let mut range = (0, mapped.len() - 1);
+        let mut range = crate::commit_order::full(mapped.len());
         let mut auto_scoped_since_last_review = false;
         let mut since_last_review_message = None;
         // Restore any persisted range scoped to this head SHA. If the
@@ -2904,7 +2903,7 @@ impl App {
         if matches!(&app.diff_source, DiffSource::PullRequest(_))
             && let Some(range) = app.commit_selection_range
             && !app.pr_commits.is_empty()
-            && (range.0 > 0 || range.1 + 1 < app.pr_commits.len())
+            && !crate::commit_order::is_full(range, app.pr_commits.len())
         {
             app.spawn_pr_range_reload();
         }
@@ -3009,7 +3008,7 @@ impl App {
         if matches!(&self.diff_source, DiffSource::PullRequest(_))
             && let Some(range) = self.commit_selection_range
             && !self.pr_commits.is_empty()
-            && (range.0 > 0 || range.1 + 1 < self.pr_commits.len())
+            && !crate::commit_order::is_full(range, self.pr_commits.len())
         {
             self.spawn_pr_range_reload();
         }
@@ -3140,17 +3139,20 @@ impl App {
         let DiffSource::PullRequest(ref pr) = self.diff_source else {
             return None;
         };
-        let (start_idx, end_idx) = self.commit_selection_range?;
+        let range = self.commit_selection_range?;
+        let (start_idx, end_idx) = range;
         if self.pr_commits.is_empty() || start_idx > end_idx || end_idx >= self.pr_commits.len() {
             return None;
         }
-        // Newest-first: `end_idx` is the oldest, `start_idx` is the newest.
-        let newest = self.pr_commits.get(start_idx)?;
+        let newest = self
+            .pr_commits
+            .get(crate::commit_order::head_index(range))?;
         // Parent of the oldest selected commit. If the oldest selected commit
         // is the PR's first commit (oldest commit overall, at the bottom of
         // the list), its parent is the PR's base SHA.
-        let parent_sha = if end_idx + 1 < self.pr_commits.len() {
-            self.pr_commits[end_idx + 1].oid.clone()
+        let parent_index = crate::commit_order::parent_index(range);
+        let parent_sha = if parent_index < self.pr_commits.len() {
+            self.pr_commits[parent_index].oid.clone()
         } else {
             pr.base_sha.clone()
         };
@@ -3175,7 +3177,7 @@ impl App {
 
         // Full-range selection: restore the cached cumulative diff
         // without hitting the network.
-        if range.0 == 0 && range.1 + 1 == total {
+        if crate::commit_order::is_full(range, total) {
             self.apply_cached_full_pr_diff();
             return;
         }
@@ -7465,13 +7467,15 @@ impl App {
         // the cumulative PR head. `pr_commits` is stored newest-first, so
         // the head of a (start_idx..=end_idx) range is `pr_commits[start_idx]`.
         let commit_id = match self.commit_selection_range {
-            Some((start_idx, end_idx))
+            Some(range)
                 if !self.pr_commits.is_empty()
-                    && start_idx <= end_idx
-                    && end_idx < self.pr_commits.len()
-                    && !(start_idx == 0 && end_idx + 1 == self.pr_commits.len()) =>
+                    && range.0 <= range.1
+                    && range.1 < self.pr_commits.len()
+                    && !crate::commit_order::is_full(range, self.pr_commits.len()) =>
             {
-                self.pr_commits[start_idx].oid.clone()
+                self.pr_commits[crate::commit_order::head_index(range)]
+                    .oid
+                    .clone()
             }
             _ => pr.key.head_sha.clone(),
         };
@@ -9015,12 +9019,12 @@ impl App {
             }
         };
 
-        // Collect selected entries in order from oldest to newest (end..start).
-        let selected_commits: Vec<CommitInfo> = (start..=end)
-            .rev()
-            .filter_map(|i| self.commit_list.get(i))
-            .cloned()
-            .collect();
+        // Collect selected entries in chronological (oldest→newest) order.
+        let selected_commits: Vec<CommitInfo> =
+            crate::commit_order::chronological_indices((start, end))
+                .filter_map(|i| self.commit_list.get(i))
+                .cloned()
+                .collect();
 
         if selected_commits.is_empty() {
             self.set_message("Select at least one commit");
@@ -9114,14 +9118,14 @@ impl App {
         // Set up inline commit selector for multi-commit reviews (newest-first display order)
         self.pr_commits.clear();
         self.pr_last_reviewed_commit_index = None;
-        self.review_commits = selected_commits.iter().rev().cloned().collect();
+        self.review_commits = crate::commit_order::into_storage_order(selected_commits);
         self.range_diff_files = Some(self.diff_files.clone());
         self.commit_list = self.review_commits.clone();
         self.commit_list_cursor = 0;
         self.commit_selection_range = if self.review_commits.is_empty() {
             None
         } else {
-            Some((0, self.review_commits.len() - 1))
+            Some(crate::commit_order::full(self.review_commits.len()))
         };
         self.commit_list_scroll_offset = 0;
         self.visible_commit_count = self.review_commits.len();
@@ -9145,8 +9149,7 @@ impl App {
         };
 
         // Check if all commits selected -> use cached range_diff_files
-        if start == 0
-            && end == self.review_commits.len() - 1
+        if crate::commit_order::is_full((start, end), self.review_commits.len())
             && let Some(ref files) = self.range_diff_files
         {
             self.diff_files = files.clone();
@@ -9190,8 +9193,7 @@ impl App {
                 .get(i)
                 .is_some_and(Self::is_unstaged_commit)
         });
-        let selected_ids: Vec<String> = (start..=end)
-            .rev() // oldest to newest
+        let selected_ids: Vec<String> = crate::commit_order::chronological_indices((start, end))
             .filter_map(|i| self.review_commits.get(i))
             .filter(|c| !Self::is_special_commit(c))
             .map(|c| c.id.clone())
@@ -9316,14 +9318,14 @@ impl App {
         // Set up inline commit selector (newest-first display order)
         self.pr_commits.clear();
         self.pr_last_reviewed_commit_index = None;
-        self.review_commits = selected_commits.into_iter().rev().collect();
+        self.review_commits = crate::commit_order::into_storage_order(selected_commits);
         self.range_diff_files = Some(self.diff_files.clone());
         self.commit_list = self.review_commits.clone();
         self.commit_list_cursor = 0;
         self.commit_selection_range = if self.review_commits.is_empty() {
             None
         } else {
-            Some((0, self.review_commits.len() - 1))
+            Some(crate::commit_order::full(self.review_commits.len()))
         };
         self.commit_list_scroll_offset = 0;
         self.visible_commit_count = self.review_commits.len();
