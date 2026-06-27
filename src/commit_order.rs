@@ -1,61 +1,77 @@
 //! Ordering convention for the inline commit selector.
 //!
-//! The selector stores commits **newest-first**: index `0` is the newest
-//! (child-most) commit and the final index is the oldest (parent-most). Every
-//! order-dependent operation routes through this module so the convention
-//! lives in exactly one place — changing the stored order (for example to
-//! oldest-first) becomes a change to these functions (plus the renderer and
-//! cursor placement) rather than a hunt through scattered index arithmetic.
+//! The selector holds a review's commits as an ordered **walk** — the sequence
+//! a VCS revision walk (`git rev-list`) or forge API produces. That sequence is
+//! a topological order, so two adjacent entries are not "older" and "newer"
+//! than one another in any wall-clock sense; the only robust facts are a
+//! commit's *position* in the walk and the walk's two endpoints.
 //!
-//! A *selection* is an inclusive `(start, end)` index pair into the commit
-//! list with `start <= end`, expressed in storage order. Because storage is
-//! newest-first, `start` is the newest selected commit and `end` the oldest.
+//! The endpoints carry the only direction that matters, and it comes from the
+//! reviewed range `base..head`, not from time:
+//! - the **head** end is the range's head; a selection's head commit is the one
+//!   whose tree forms the diff's new side;
+//! - the **base** end is the range's base boundary; the commit just past it is
+//!   the diff's base (old side).
+//!
+//! The selector stores the walk **head-end first** (index `0` is the head end).
+//! Every order-dependent operation routes through this module, so the storage
+//! direction lives in exactly one place: changing it (for example to display
+//! the walk base-end first) becomes a change to these functions — plus the
+//! renderer and cursor placement — while the head/base *roles* stay fixed, so
+//! callers keep working unchanged.
+//!
+//! A *selection* is an inclusive `(start, end)` index pair into the walk with
+//! `start <= end`. With head-end-first storage, `start` is the selection's
+//! head-side position and `end` its base-side position.
 
-/// Inclusive `(start, end)` selection over the commit list, in storage order.
+/// Inclusive `(start, end)` selection over the commit walk, in storage order.
 pub type SelectionRange = (usize, usize);
 
-/// Reverse a chronological (oldest→newest) list into the selector's storage
-/// order. Use at construction time wherever a VCS or forge hands us commits
-/// oldest-first.
-pub fn into_storage_order<T>(mut chronological: Vec<T>) -> Vec<T> {
-    chronological.reverse();
-    chronological
+/// Reverse a base-end-first walk — the order a VCS revision walk or forge API
+/// yields (base boundary first, head last) — into the selector's storage order,
+/// which is head-end first.
+pub fn into_storage_order<T>(mut base_to_head: Vec<T>) -> Vec<T> {
+    base_to_head.reverse();
+    base_to_head
 }
 
-/// The indices covered by `range`, yielded in chronological (oldest→newest)
-/// order — the order a diff wants its commits applied in.
-pub fn chronological_indices(range: SelectionRange) -> impl DoubleEndedIterator<Item = usize> {
+/// The indices of `range` yielded base-end first, head-end last — the order a
+/// diff consumes a commit list (first entry is the base side).
+pub fn base_to_head_indices(range: SelectionRange) -> impl DoubleEndedIterator<Item = usize> {
     (range.0..=range.1).rev()
 }
 
-/// Storage index of the newest (head / child-most) commit in `range`.
+/// Storage index of the selection's head commit — the one whose tree forms the
+/// diff's new side.
 pub fn head_index(range: SelectionRange) -> usize {
     range.0
 }
 
-/// Storage index just past the oldest selected commit — the parent of the
-/// selection. May equal the list length, meaning the selection reaches the
-/// oldest commit overall and has no parent within the list.
-pub fn parent_index(range: SelectionRange) -> usize {
+/// Storage index just past the base end of the selection: the commit adjacent
+/// to it on the base side, used as the diff's base (old side). May equal the
+/// walk length, meaning the selection reaches the base end and no commit lies
+/// beyond it.
+pub fn base_boundary_index(range: SelectionRange) -> usize {
     range.1 + 1
 }
 
-/// Selection covering the whole list of `len` commits. Callers ensure
-/// `len > 0`; `saturating_sub` keeps an empty list from underflowing.
+/// Selection covering the whole walk of `len` commits. Callers ensure
+/// `len > 0`; `saturating_sub` keeps an empty walk from underflowing.
 pub fn full(len: usize) -> SelectionRange {
     (0, len.saturating_sub(1))
 }
 
-/// Whether `range` spans the entire list of `len` commits.
+/// Whether `range` spans the entire walk of `len` commits.
 pub fn is_full(range: SelectionRange, len: usize) -> bool {
     range.0 == 0 && range.1 + 1 == len
 }
 
-/// Selection covering every commit newer (child-ward) than the commit at
-/// `reviewed_index` in storage order. `None` when nothing is newer (the
-/// reviewed commit is already the newest).
-pub fn newer_than(reviewed_index: usize) -> Option<SelectionRange> {
-    (reviewed_index > 0).then(|| (0, reviewed_index - 1))
+/// Selection covering the commits on the head side of the commit at `index` —
+/// the positions ahead of it in the walk. Used to scope "everything past the
+/// last-reviewed commit". `None` when nothing lies on its head side (it is
+/// already at the head end).
+pub fn head_side_of(index: usize) -> Option<SelectionRange> {
+    (index > 0).then(|| (0, index - 1))
 }
 
 #[cfg(test)]
@@ -63,26 +79,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn into_storage_order_reverses_chronological() {
+    fn into_storage_order_reverses_walk() {
         assert_eq!(into_storage_order(vec![1, 2, 3]), vec![3, 2, 1]);
         assert_eq!(into_storage_order(Vec::<u8>::new()), Vec::<u8>::new());
     }
 
     #[test]
-    fn chronological_indices_yields_oldest_first() {
+    fn base_to_head_indices_yields_base_end_first() {
         assert_eq!(
-            chronological_indices((1, 3)).collect::<Vec<_>>(),
+            base_to_head_indices((1, 3)).collect::<Vec<_>>(),
             vec![3, 2, 1]
         );
-        assert_eq!(chronological_indices((2, 2)).collect::<Vec<_>>(), vec![2]);
+        assert_eq!(base_to_head_indices((2, 2)).collect::<Vec<_>>(), vec![2]);
     }
 
     #[test]
-    fn head_and_parent_indices() {
+    fn head_and_base_boundary_indices() {
         assert_eq!(head_index((0, 4)), 0);
         assert_eq!(head_index((2, 4)), 2);
-        assert_eq!(parent_index((1, 3)), 4);
-        assert_eq!(parent_index((0, 0)), 1);
+        assert_eq!(base_boundary_index((1, 3)), 4);
+        assert_eq!(base_boundary_index((0, 0)), 1);
     }
 
     #[test]
@@ -92,14 +108,14 @@ mod tests {
         assert!(is_full((0, 4), 5));
         assert!(!is_full((1, 4), 5));
         assert!(!is_full((0, 3), 5));
-        // An empty list is never "full" of a real selection.
+        // An empty walk is never "full" of a real selection.
         assert!(!is_full((0, 0), 0));
     }
 
     #[test]
-    fn newer_than_excludes_when_already_newest() {
-        assert_eq!(newer_than(0), None);
-        assert_eq!(newer_than(1), Some((0, 0)));
-        assert_eq!(newer_than(3), Some((0, 2)));
+    fn head_side_of_excludes_when_at_head_end() {
+        assert_eq!(head_side_of(0), None);
+        assert_eq!(head_side_of(1), Some((0, 0)));
+        assert_eq!(head_side_of(3), Some((0, 2)));
     }
 }

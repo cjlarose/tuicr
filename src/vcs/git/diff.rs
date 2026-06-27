@@ -126,8 +126,8 @@ pub fn get_unstaged_diff(
 }
 
 /// Get the diff for a range of commits.
-/// `commit_ids` should be ordered from oldest to newest.
-/// The diff compares the oldest commit's parent to the newest commit.
+/// `commit_ids` must be ordered base→head (first = base side, last = head side).
+/// The diff compares the first commit's parent to the last commit's tree.
 pub fn get_commit_range_diff(
     repo: &Repository,
     revision_range: &ResolvedRevisionRange<'_>,
@@ -159,19 +159,19 @@ fn commit_list_range_trees<'repo>(
         return Err(TuicrError::NoChanges);
     }
 
-    let oldest_id = git2::Oid::from_str(&commit_ids[0])?;
-    let oldest_commit = repo.find_commit(oldest_id)?;
+    let base_id = git2::Oid::from_str(&commit_ids[0])?;
+    let base_commit = repo.find_commit(base_id)?;
 
-    let newest_id = git2::Oid::from_str(commit_ids.last().unwrap())?;
-    let newest_commit = repo.find_commit(newest_id)?;
+    let head_id = git2::Oid::from_str(commit_ids.last().unwrap())?;
+    let head_commit = repo.find_commit(head_id)?;
 
-    let old_tree = if oldest_commit.parent_count() > 0 {
-        Some(oldest_commit.parent(0)?.tree()?)
+    let old_tree = if base_commit.parent_count() > 0 {
+        Some(base_commit.parent(0)?.tree()?)
     } else {
         None
     };
 
-    Ok((old_tree, newest_commit.tree()?))
+    Ok((old_tree, head_commit.tree()?))
 }
 
 // Explicit revision ranges carry commit IDs for old/new endpoints,
@@ -205,7 +205,7 @@ fn diff_commit_trees(
     Ok(files)
 }
 
-/// Get a combined diff from the parent of the oldest commit through to the working tree.
+/// Get a combined diff from the parent of the base (first) commit through to the working tree.
 /// This shows both committed and working tree changes in a single diff.
 pub fn get_working_tree_with_commits_diff(
     repo: &Repository,
@@ -217,11 +217,11 @@ pub fn get_working_tree_with_commits_diff(
         return Err(TuicrError::NoChanges);
     }
 
-    let oldest_id = git2::Oid::from_str(&commit_ids[0])?;
-    let oldest_commit = repo.find_commit(oldest_id)?;
+    let base_id = git2::Oid::from_str(&commit_ids[0])?;
+    let base_commit = repo.find_commit(base_id)?;
 
-    let old_tree = if oldest_commit.parent_count() > 0 {
-        Some(oldest_commit.parent(0)?.tree()?)
+    let old_tree = if base_commit.parent_count() > 0 {
+        Some(base_commit.parent(0)?.tree()?)
     } else {
         None
     };

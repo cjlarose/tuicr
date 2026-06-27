@@ -393,8 +393,8 @@ pub trait ForgeBackend {
     ) -> Result<Vec<crate::forge::remote_comments::RemoteReviewSummary>> {
         Ok(Vec::new())
     }
-    /// List the commits that make up a pull request, in chronological order
-    /// (oldest first; the App reverses to newest-first display order). The
+    /// List the commits that make up a pull request, in base→head order
+    /// (base first; the App reverses to head-end-first storage order). The
     /// list scopes the inline commit selector so users can narrow a PR's
     /// cumulative diff down to a contiguous subrange.
     fn list_pull_request_commits(&self, pr: &PullRequestDetails) -> Result<Vec<PullRequestCommit>>;
