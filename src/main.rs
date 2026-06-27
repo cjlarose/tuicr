@@ -277,6 +277,16 @@ fn main() -> anyhow::Result<()> {
         if let Some(interval_ms) = cfg.review_watch_interval_ms {
             app.set_review_watch_interval_ms(interval_ms as u64);
         }
+        if let Some(order) = cfg
+            .commit_order
+            .as_deref()
+            .and_then(tuicr::commit_order::DisplayOrder::parse_name)
+        {
+            app.commit_display_order = order;
+            if order == tuicr::commit_order::DisplayOrder::BaseFirst {
+                app.place_commit_cursor_at_display_top();
+            }
+        }
     }
 
     // On narrow terminals, start with only the diff panel visible.

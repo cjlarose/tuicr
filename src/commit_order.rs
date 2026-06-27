@@ -74,6 +74,41 @@ pub fn head_side_of(index: usize) -> Option<SelectionRange> {
     (index > 0).then(|| (0, index - 1))
 }
 
+/// Direction the selector *renders* the walk in. The stored/canonical order is
+/// always head-end first (see the module docs); this affects presentation and
+/// navigation only — never the persisted selection indices, the diff, or the
+/// head/base roles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DisplayOrder {
+    /// Head end at the top (storage index `0` first) — the historical default.
+    #[default]
+    HeadFirst,
+    /// Base end at the top (parent → child, like a GitHub PR's commit list).
+    BaseFirst,
+}
+
+impl DisplayOrder {
+    /// Parse a `commit_order` config value. Returns `None` for unknown values
+    /// so the config layer can warn and fall back to the default.
+    pub fn parse_name(s: &str) -> Option<Self> {
+        match s {
+            "head-first" => Some(Self::HeadFirst),
+            "base-first" => Some(Self::BaseFirst),
+            _ => None,
+        }
+    }
+}
+
+/// Convert between a storage position (head-end first) and its display row
+/// under `order`, for a list of `n` rows. The mapping is an involution, so the
+/// same call converts storage→row and row→storage.
+pub fn display_position(pos: usize, n: usize, order: DisplayOrder) -> usize {
+    match order {
+        DisplayOrder::HeadFirst => pos,
+        DisplayOrder::BaseFirst => n.saturating_sub(1).saturating_sub(pos),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +152,36 @@ mod tests {
         assert_eq!(head_side_of(0), None);
         assert_eq!(head_side_of(1), Some((0, 0)));
         assert_eq!(head_side_of(3), Some((0, 2)));
+    }
+
+    #[test]
+    fn display_position_is_identity_for_head_first() {
+        for i in 0..5 {
+            assert_eq!(display_position(i, 5, DisplayOrder::HeadFirst), i);
+        }
+    }
+
+    #[test]
+    fn display_position_reverses_for_base_first_and_is_involution() {
+        assert_eq!(display_position(0, 5, DisplayOrder::BaseFirst), 4);
+        assert_eq!(display_position(4, 5, DisplayOrder::BaseFirst), 0);
+        for i in 0..5 {
+            let row = display_position(i, 5, DisplayOrder::BaseFirst);
+            assert_eq!(display_position(row, 5, DisplayOrder::BaseFirst), i);
+        }
+    }
+
+    #[test]
+    fn display_order_parses_known_values() {
+        assert_eq!(
+            DisplayOrder::parse_name("head-first"),
+            Some(DisplayOrder::HeadFirst)
+        );
+        assert_eq!(
+            DisplayOrder::parse_name("base-first"),
+            Some(DisplayOrder::BaseFirst)
+        );
+        assert_eq!(DisplayOrder::parse_name("nope"), None);
+        assert_eq!(DisplayOrder::default(), DisplayOrder::HeadFirst);
     }
 }

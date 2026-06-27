@@ -25,11 +25,12 @@ pub(super) fn render_inline_commit_selector(frame: &mut Frame, app: &mut App, ar
     app.commit_list_viewport_height = inner.height as usize;
     app.commit_list_inner_area = Some(inner);
 
-    let items: Vec<Line> = app
-        .review_commits
-        .iter()
-        .enumerate()
-        .map(|(i, commit)| {
+    let order = app.effective_commit_order();
+    let n = app.review_commits.len();
+    let items: Vec<Line> = (0..n)
+        .map(|row| {
+            let i = crate::commit_order::display_position(row, n, order);
+            let commit = &app.review_commits[i];
             render_commit_row(&CommitRowSpec {
                 commit,
                 is_cursor: i == app.commit_list_cursor,

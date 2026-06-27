@@ -1237,6 +1237,9 @@ pub struct App {
     pub pending_count: Option<usize>,
 
     // Inline commit selector state (shown at top of diff view for multi-commit reviews)
+    /// Direction the inline commit selector renders the walk in. Storage stays
+    /// head-end first regardless; this only affects display and navigation.
+    pub commit_display_order: crate::commit_order::DisplayOrder,
     /// CommitInfo for the current review's commits, in selector storage order
     /// (head-end first).
     pub review_commits: Vec<CommitInfo>,
@@ -1993,6 +1996,7 @@ impl App {
             comment_input_annotation_offset: None,
             update_info: None,
             pending_count: None,
+            commit_display_order: crate::commit_order::DisplayOrder::default(),
             review_commits: Vec::new(),
             pr_commits: Vec::new(),
             pr_last_reviewed_commit_index: None,
@@ -2752,14 +2756,24 @@ impl App {
 
         self.commit_selection_range = Some(range);
         self.review_commits = mapped;
+        // Default cursor goes to the top display row (order-aware); the
+        // since-last-review branch below may override it.
+        self.place_commit_cursor_at_display_top();
 
         if let Some(message) = since_last_review_message {
             if auto_scoped_since_last_review
                 && Self::is_strict_commit_selection(Some(range), self.pr_commits.len())
             {
                 self.focused_panel = FocusedPanel::CommitSelector;
+                // Anchor on the base-end commit and scroll by its *display*
+                // row so it stays on screen under either display order.
                 self.commit_list_cursor = self.pr_commits.len().saturating_sub(1);
-                self.commit_list_scroll_offset = self.commit_list_cursor.saturating_sub(5);
+                let cursor_row = crate::commit_order::display_position(
+                    self.commit_list_cursor,
+                    self.commit_row_count(),
+                    self.effective_commit_order(),
+                );
+                self.commit_list_scroll_offset = cursor_row.saturating_sub(5);
             }
             return Some(message);
         }
@@ -5599,14 +5613,23 @@ impl App {
             return None;
         }
         let rel = (screen_row - inner.y) as usize;
-        let idx = self.commit_list_scroll_offset + rel;
-        let total = match self.input_mode {
-            InputMode::CommitSelect => {
-                self.visible_commit_count + usize::from(self.can_show_more_commits())
-            }
-            _ => self.review_commits.len(),
-        };
-        (idx < total).then_some(idx)
+        let display_row = self.commit_list_scroll_offset + rel;
+        let n = self.commit_row_count();
+        let has_expand =
+            matches!(self.input_mode, InputMode::CommitSelect) && self.can_show_more_commits();
+        if display_row >= n + usize::from(has_expand) {
+            return None;
+        }
+        // The "show more" sentinel sits at the bottom in display space; commit
+        // rows map back through the configured display order.
+        if has_expand && display_row == n {
+            return Some(n);
+        }
+        Some(crate::commit_order::display_position(
+            display_row,
+            n,
+            self.effective_commit_order(),
+        ))
     }
 
     /// Syncs `current_file_idx` so the file list selection follows when the
@@ -8061,11 +8084,10 @@ impl App {
         if !self.review_commits.is_empty() {
             self.commit_list = self.review_commits.clone();
             self.commit_selection_range = self.saved_inline_selection;
-            self.commit_list_cursor = 0;
-            self.commit_list_scroll_offset = 0;
             self.visible_commit_count = self.review_commits.len();
             self.has_more_commit = false;
             self.saved_inline_selection = None;
+            self.place_commit_cursor_at_display_top();
 
             // Reload diff for the restored selection
             if self.commit_selection_range.is_some() {
@@ -8743,33 +8765,95 @@ impl App {
 
     // Commit selection methods
 
+    /// The display order that currently applies. The full-screen target picker
+    /// (`CommitSelect` mode) is a "recent commits" chooser and always reads
+    /// head-first; only the inline review selector honors the configured
+    /// `commit_display_order`. Keeping the picker head-first also keeps its
+    /// "show more" affordance and pagination at the bottom where they belong.
+    pub fn effective_commit_order(&self) -> crate::commit_order::DisplayOrder {
+        match self.input_mode {
+            InputMode::CommitSelect => crate::commit_order::DisplayOrder::HeadFirst,
+            _ => self.commit_display_order,
+        }
+    }
+
+    /// Number of commit rows the selector currently displays (excluding the
+    /// "show more" affordance). Used as the length for display↔storage mapping.
+    fn commit_row_count(&self) -> usize {
+        match self.input_mode {
+            InputMode::CommitSelect => self.visible_commit_count,
+            _ => self.review_commits.len(),
+        }
+    }
+
+    /// Display row of the cursor. The "show more" sentinel
+    /// (`commit_list_cursor == commit_row_count`) maps to the bottom row.
+    fn cursor_display_row(&self) -> usize {
+        let n = self.commit_row_count();
+        if self.commit_list_cursor >= n {
+            self.commit_list_cursor
+        } else {
+            crate::commit_order::display_position(
+                self.commit_list_cursor,
+                n,
+                self.effective_commit_order(),
+            )
+        }
+    }
+
+    /// Move the cursor to display row `row`, scrolling the window so it stays
+    /// visible. `row == commit_row_count` selects the "show more" sentinel.
+    fn set_cursor_to_display_row(&mut self, row: usize) {
+        let n = self.commit_row_count();
+        self.commit_list_cursor = if row >= n {
+            row
+        } else {
+            crate::commit_order::display_position(row, n, self.effective_commit_order())
+        };
+        if row < self.commit_list_scroll_offset {
+            self.commit_list_scroll_offset = row;
+        } else if self.commit_list_viewport_height > 0
+            && row >= self.commit_list_scroll_offset + self.commit_list_viewport_height
+        {
+            self.commit_list_scroll_offset = row - self.commit_list_viewport_height + 1;
+        }
+    }
+
+    /// Select exactly the commit shown at display row `d`, moving the cursor to
+    /// it and scrolling it into view.
+    fn select_single_commit_at_display_row(&mut self, d: usize) {
+        self.set_cursor_to_display_row(d);
+        let storage = self.commit_list_cursor;
+        self.commit_selection_range = Some((storage, storage));
+    }
+
+    /// Place the commit-selector cursor on the top display row and reset the
+    /// scroll window. Applied after the configured display order so the initial
+    /// cursor matches what the user sees (used for base-first ordering).
+    pub fn place_commit_cursor_at_display_top(&mut self) {
+        if self.commit_row_count() == 0 {
+            return;
+        }
+        self.commit_list_scroll_offset = 0;
+        self.set_cursor_to_display_row(0);
+    }
+
     pub fn commit_select_up(&mut self) {
-        if self.commit_list_cursor > 0 {
-            self.commit_list_cursor -= 1;
-            // Scroll up if cursor goes above visible area
-            if self.commit_list_cursor < self.commit_list_scroll_offset {
-                self.commit_list_scroll_offset = self.commit_list_cursor;
-            }
+        let row = self.cursor_display_row();
+        if row > 0 {
+            self.set_cursor_to_display_row(row - 1);
         }
     }
 
     pub fn commit_select_down(&mut self) {
-        let max_cursor = if self.can_show_more_commits() {
-            self.visible_commit_count
+        let max_row = if self.can_show_more_commits() {
+            self.commit_row_count()
         } else {
-            self.visible_commit_count.saturating_sub(1)
+            self.commit_row_count().saturating_sub(1)
         };
-
-        if self.commit_list_cursor < max_cursor {
-            self.commit_list_cursor += 1;
-            // Scroll down if cursor goes below visible area
-            if self.commit_list_viewport_height > 0
-                && self.commit_list_cursor
-                    >= self.commit_list_scroll_offset + self.commit_list_viewport_height
-            {
-                self.commit_list_scroll_offset =
-                    self.commit_list_cursor - self.commit_list_viewport_height + 1;
-            }
+        let row = self.cursor_display_row();
+        if row < max_row {
+            self.set_cursor_to_display_row(row + 1);
         }
     }
 
@@ -8790,8 +8874,11 @@ impl App {
         if was_selected || !now_selected {
             return;
         }
-        if let Some((_, end)) = self.commit_selection_range {
-            while self.commit_list_cursor <= end {
+        if self.commit_selection_range.is_some() {
+            // Advance (visually downward) past the selection so a repeated
+            // press extends it contiguously. Driven by `is_commit_selected`
+            // rather than raw indices so it holds under either display order.
+            while self.is_commit_selected(self.commit_list_cursor) {
                 let before = self.commit_list_cursor;
                 self.commit_select_down();
                 if self.commit_list_cursor == before {
@@ -8932,72 +9019,70 @@ impl App {
                 .is_some_and(|reviewed_index| index >= reviewed_index)
     }
 
-    /// Cycle inline commit selector to the next individual commit (`)` key).
-    /// all → last, i → i+1, last → all
+    /// Cycle inline commit selector one commit toward the bottom of the
+    /// display (`)` key): all → bottom row, then row d → d+1, bottom → all.
+    /// Defined in display-row space so it tracks the configured order (and
+    /// scrolls into view) the same way `j`/`k` do. With head-first storage the
+    /// display row equals the storage index, reproducing the original
+    /// all → last / i → i+1 / last → all *selection* cycle (and additionally
+    /// scrolling the cursor into view, which the original did not).
     pub fn cycle_commit_next(&mut self) {
-        if self.review_commits.is_empty() {
+        let n = self.review_commits.len();
+        if n == 0 {
             return;
         }
-        let n = self.review_commits.len();
+        let order = self.effective_commit_order();
         let all_selected = Some((0, n - 1));
 
         if self.commit_selection_range == all_selected {
-            // all → last
-            self.commit_selection_range = Some((n - 1, n - 1));
-            self.commit_list_cursor = n - 1;
+            self.select_single_commit_at_display_row(n - 1);
         } else if let Some((i, j)) = self.commit_selection_range {
             if i == j {
-                // Single commit selected
-                if i == n - 1 {
-                    // last → all
+                let d = crate::commit_order::display_position(i, n, order);
+                if d == n - 1 {
                     self.commit_selection_range = all_selected;
                 } else {
-                    // i → i+1
-                    self.commit_selection_range = Some((i + 1, i + 1));
-                    self.commit_list_cursor = i + 1;
+                    self.select_single_commit_at_display_row(d + 1);
                 }
             } else {
-                // Multi-commit subrange → select last of that range
-                self.commit_selection_range = Some((j, j));
-                self.commit_list_cursor = j;
+                // Multi-commit subrange → its bottom display row.
+                let di = crate::commit_order::display_position(i, n, order);
+                let dj = crate::commit_order::display_position(j, n, order);
+                self.select_single_commit_at_display_row(di.max(dj));
             }
         } else {
-            // None selected → select all
             self.commit_selection_range = all_selected;
         }
     }
 
-    /// Cycle inline commit selector to the previous individual commit (`(` key).
-    /// all → first, i → i-1, first → all
+    /// Cycle inline commit selector one commit toward the top of the display
+    /// (`(` key): all → top row, then row d → d-1, top → all. The display-space
+    /// mirror of [`Self::cycle_commit_next`].
     pub fn cycle_commit_prev(&mut self) {
-        if self.review_commits.is_empty() {
+        let n = self.review_commits.len();
+        if n == 0 {
             return;
         }
-        let n = self.review_commits.len();
+        let order = self.effective_commit_order();
         let all_selected = Some((0, n - 1));
 
         if self.commit_selection_range == all_selected {
-            // all → first
-            self.commit_selection_range = Some((0, 0));
-            self.commit_list_cursor = 0;
+            self.select_single_commit_at_display_row(0);
         } else if let Some((i, j)) = self.commit_selection_range {
             if i == j {
-                // Single commit selected
-                if i == 0 {
-                    // first → all
+                let d = crate::commit_order::display_position(i, n, order);
+                if d == 0 {
                     self.commit_selection_range = all_selected;
                 } else {
-                    // i → i-1
-                    self.commit_selection_range = Some((i - 1, i - 1));
-                    self.commit_list_cursor = i - 1;
+                    self.select_single_commit_at_display_row(d - 1);
                 }
             } else {
-                // Multi-commit subrange → select first of that range
-                self.commit_selection_range = Some((i, i));
-                self.commit_list_cursor = i;
+                // Multi-commit subrange → its top display row.
+                let di = crate::commit_order::display_position(i, n, order);
+                let dj = crate::commit_order::display_position(j, n, order);
+                self.select_single_commit_at_display_row(di.min(dj));
             }
         } else {
-            // None selected → select all
             self.commit_selection_range = all_selected;
         }
     }
@@ -9128,14 +9213,13 @@ impl App {
         self.review_commits = crate::commit_order::into_storage_order(selected_commits);
         self.range_diff_files = Some(self.diff_files.clone());
         self.commit_list = self.review_commits.clone();
-        self.commit_list_cursor = 0;
         self.commit_selection_range = if self.review_commits.is_empty() {
             None
         } else {
             Some(crate::commit_order::full(self.review_commits.len()))
         };
-        self.commit_list_scroll_offset = 0;
         self.visible_commit_count = self.review_commits.len();
+        self.place_commit_cursor_at_display_top();
         self.has_more_commit = false;
         self.show_commit_selector = self.review_commits.len() > 1;
         self.commit_diff_cache.clear();
@@ -9328,14 +9412,13 @@ impl App {
         self.review_commits = crate::commit_order::into_storage_order(selected_commits);
         self.range_diff_files = Some(self.diff_files.clone());
         self.commit_list = self.review_commits.clone();
-        self.commit_list_cursor = 0;
         self.commit_selection_range = if self.review_commits.is_empty() {
             None
         } else {
             Some(crate::commit_order::full(self.review_commits.len()))
         };
-        self.commit_list_scroll_offset = 0;
         self.visible_commit_count = self.review_commits.len();
+        self.place_commit_cursor_at_display_top();
         self.has_more_commit = false;
         self.show_commit_selector = self.review_commits.len() > 1;
         self.commit_diff_cache.clear();
@@ -10856,6 +10939,133 @@ mod commit_selection_tests {
 
         assert_eq!(app.commit_selection_range, Some((1, 1)));
     }
+
+    #[test]
+    fn head_first_nav_is_unchanged() {
+        let mut app = build_app(vec![
+            normal_commit("c0"),
+            normal_commit("c1"),
+            normal_commit("c2"),
+        ]);
+        // Default order is head-first: storage index == display row.
+        app.commit_list_cursor = 0;
+        app.commit_select_down();
+        assert_eq!(app.commit_list_cursor, 1);
+        app.commit_select_up();
+        assert_eq!(app.commit_list_cursor, 0);
+    }
+
+    #[test]
+    fn base_first_nav_moves_cursor_in_reverse_storage_order() {
+        let mut app = build_app(vec![
+            normal_commit("c0"),
+            normal_commit("c1"),
+            normal_commit("c2"),
+        ]);
+        // Drive the *inline* review selector (Normal mode), which honors the
+        // configured order. The full-screen picker (CommitSelect) does not.
+        app.input_mode = InputMode::Normal;
+        app.review_commits = app.commit_list.clone();
+        app.commit_display_order = crate::commit_order::DisplayOrder::BaseFirst;
+
+        // Top display row is the base end = storage index 2.
+        app.place_commit_cursor_at_display_top();
+        assert_eq!(app.commit_list_cursor, 2);
+
+        // Moving down (visually) walks toward the head end: 2 -> 1 -> 0.
+        app.commit_select_down();
+        assert_eq!(app.commit_list_cursor, 1);
+        app.commit_select_down();
+        assert_eq!(app.commit_list_cursor, 0);
+        // Already on the bottom display row; can't advance further.
+        app.commit_select_down();
+        assert_eq!(app.commit_list_cursor, 0);
+
+        // Moving up returns toward the base end.
+        app.commit_select_up();
+        assert_eq!(app.commit_list_cursor, 1);
+    }
+
+    #[test]
+    fn full_screen_picker_stays_head_first_under_base_first_config() {
+        let mut app = build_app(vec![
+            normal_commit("c0"),
+            normal_commit("c1"),
+            normal_commit("c2"),
+        ]);
+        // build_app opens the full-screen target picker (CommitSelect mode),
+        // which is a recent-commits chooser and ignores `commit_order`.
+        app.commit_display_order = crate::commit_order::DisplayOrder::BaseFirst;
+        app.commit_list_cursor = 0;
+        // Down advances in storage order (head-first), unaffected by the
+        // base-first config.
+        app.commit_select_down();
+        assert_eq!(app.commit_list_cursor, 1);
+    }
+
+    #[test]
+    fn head_first_cycle_next_unchanged() {
+        let mut app = build_app(vec![
+            normal_commit("c0"),
+            normal_commit("c1"),
+            normal_commit("c2"),
+        ]);
+        app.input_mode = InputMode::Normal;
+        app.review_commits = app.commit_list.clone();
+        // Default head-first: display row == storage index, so `)` walks i -> i+1.
+        app.commit_selection_range = Some((0, 0));
+        app.commit_list_cursor = 0;
+        app.cycle_commit_next();
+        assert_eq!(app.commit_selection_range, Some((1, 1)));
+        assert_eq!(app.commit_list_cursor, 1);
+    }
+
+    #[test]
+    fn base_first_cycle_next_is_visually_downward() {
+        let mut app = build_app(vec![
+            normal_commit("c0"),
+            normal_commit("c1"),
+            normal_commit("c2"),
+        ]);
+        app.input_mode = InputMode::Normal;
+        app.review_commits = app.commit_list.clone();
+        app.commit_display_order = crate::commit_order::DisplayOrder::BaseFirst;
+        // Under base-first the top display row (row 0) is the base end = storage 2.
+        app.commit_selection_range = Some((2, 2));
+        app.commit_list_cursor = 2;
+        // `)` moves one row DOWN -> display row 1 = storage 1 (not storage 3/up).
+        app.cycle_commit_next();
+        assert_eq!(app.commit_list_cursor, 1);
+        assert_eq!(app.commit_selection_range, Some((1, 1)));
+        // Again -> bottom display row (row 2) = storage 0.
+        app.cycle_commit_next();
+        assert_eq!(app.commit_list_cursor, 0);
+        assert_eq!(app.commit_selection_range, Some((0, 0)));
+    }
+
+    #[test]
+    fn cycle_next_scrolls_cursor_into_view() {
+        let commits: Vec<_> = (0..10).map(|i| normal_commit(&format!("c{i}"))).collect();
+        let mut app = build_app(commits);
+        app.input_mode = InputMode::Normal;
+        app.review_commits = app.commit_list.clone();
+        app.commit_list_viewport_height = 3;
+        app.commit_selection_range = Some((0, 0));
+        app.commit_list_cursor = 0;
+        app.commit_list_scroll_offset = 0;
+        // Cycle down past the viewport; the cursor must scroll into view.
+        for _ in 0..5 {
+            app.cycle_commit_next();
+        }
+        let row = app.commit_list_cursor; // head-first: display row == storage index
+        assert!(
+            row >= app.commit_list_scroll_offset && row < app.commit_list_scroll_offset + 3,
+            "cursor row {} not within viewport [{}, {})",
+            row,
+            app.commit_list_scroll_offset,
+            app.commit_list_scroll_offset + 3
+        );
+    }
 }
 
 #[cfg(test)]
@@ -11429,6 +11639,45 @@ mod target_selector_tests {
             selection.message,
             "Showing 1 commit since your last review — press Enter to see all"
         );
+    }
+
+    #[test]
+    fn base_first_places_pr_selector_cursor_at_display_top() {
+        let mut app = build_app();
+        app.commit_display_order = crate::commit_order::DisplayOrder::BaseFirst;
+        let commits = vec![
+            sample_pr_commit("c3", "third"),
+            sample_pr_commit("c2", "second"),
+            sample_pr_commit("c1", "first"),
+        ];
+        // No review metadata -> full-range selection, default cursor placement.
+        app.apply_pr_commit_selector(commits, review_metadata(vec![]));
+        // base-first: the top display row is the base end = storage index n-1.
+        assert_eq!(app.commit_list_cursor, app.pr_commits.len() - 1);
+        assert_eq!(app.commit_list_scroll_offset, 0);
+    }
+
+    #[test]
+    fn base_first_keeps_since_last_review_cursor_on_screen() {
+        let mut app = build_app();
+        app.commit_display_order = crate::commit_order::DisplayOrder::BaseFirst;
+        // 8 commits (head-first storage: index 0 = c7 .. index 7 = c0) so a
+        // bottom-anchored scroll (cursor - 5) would be > 0 and reveal the bug.
+        let commits: Vec<_> = (0..8)
+            .rev()
+            .map(|i| sample_pr_commit(&format!("c{i}"), "msg"))
+            .collect();
+        // Viewer reviewed c3 (storage index 4) -> auto-scope a strict subset.
+        let metadata = review_metadata(vec![review_record(
+            "ronen-hoffer",
+            "c3",
+            "2026-06-03T10:00:00Z",
+        )]);
+        app.apply_pr_commit_selector(commits, metadata);
+        // Cursor anchors on the base-end commit (storage n-1); under base-first
+        // that is display row 0, so the viewport must start at 0 to show it.
+        assert_eq!(app.commit_list_cursor, app.pr_commits.len() - 1);
+        assert_eq!(app.commit_list_scroll_offset, 0);
     }
 
     #[test]

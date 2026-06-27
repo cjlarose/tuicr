@@ -25,6 +25,7 @@ theme_dark = "gruvbox-dark"
 theme_light = "gruvbox-light"
 
 diff_view = "side-by-side"
+commit_order = "head-first"
 ignore_whitespace = false
 show_file_list = true
 mouse = true
@@ -61,6 +62,7 @@ comment_type_prefix = true
 | `theme_dark` | (none) | Theme name for dark appearance (paired with `theme_light`). |
 | `theme_light` | (none) | Theme name for light appearance (paired with `theme_dark`). |
 | `diff_view` | `unified` | `unified` or `side-by-side`. Toggle in-app with `:diff`. |
+| `commit_order` | `head-first` | Order the inline commit selector lists commits: `head-first` (newest/child-most at top) or `base-first` (parent → child, like a GitHub PR's commit list). Affects display and navigation only — not the diff or saved sessions. |
 | `ignore_whitespace` | `false` | Ignore all whitespace in local Git, jj, and hg diffs. PR diffs are unchanged. |
 | `show_file_list` | `true` | Whether the file list panel is visible on startup. Toggle with `<leader>e`. |
 | `mouse` | `true` | Wheel scrolling, clicks, and drag-to-select. |

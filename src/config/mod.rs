@@ -41,6 +41,10 @@ pub struct AppConfig {
     pub theme_dark: Option<String>,
     pub theme_light: Option<String>,
     pub appearance: Option<String>,
+    /// Direction the inline commit selector renders the commit walk:
+    /// `"head-first"` (default) or `"base-first"` (parent → child, like a
+    /// GitHub PR's commit list). Unrecognized values fall back to the default.
+    pub commit_order: Option<String>,
     pub backend: Option<String>,
     pub comment_types: Option<Vec<CommentTypeConfig>>,
     pub show_file_list: Option<bool>,
@@ -80,6 +84,7 @@ const KNOWN_KEYS: &[&str] = &[
     "theme_dark",
     "theme_light",
     "appearance",
+    "commit_order",
     "backend",
     "comment_types",
     "show_file_list",
@@ -309,6 +314,12 @@ fn load_config_from_path(path: &Path) -> Result<ConfigLoadOutcome> {
         no_update_check: read_bool(table, "no_update_check", &mut warnings),
         single_file_view: read_bool(table, "single_file_view", &mut warnings),
         username: read_string(table, "username", &mut warnings),
+        commit_order: read_enum(
+            table,
+            "commit_order",
+            &["head-first", "base-first"],
+            &mut warnings,
+        ),
         forge: table
             .get("forge")
             .and_then(|v| parse_forge(v, &mut warnings)),
@@ -585,6 +596,36 @@ mod tests {
         assert_eq!(cfg.theme_light.as_deref(), Some("gruvbox-light"));
         assert_eq!(cfg.appearance.as_deref(), Some("system"));
         assert!(outcome.warnings.is_empty());
+    }
+
+    #[test]
+    fn should_load_valid_commit_order_without_warning() {
+        let outcome = parse_config("commit_order = \"base-first\"\n");
+        assert_eq!(
+            outcome
+                .config
+                .as_ref()
+                .and_then(|cfg| cfg.commit_order.as_deref()),
+            Some("base-first")
+        );
+        assert!(outcome.warnings.is_empty());
+    }
+
+    #[test]
+    fn should_warn_and_drop_invalid_commit_order() {
+        let outcome = parse_config("commit_order = \"base\"\n");
+        assert_eq!(
+            outcome
+                .config
+                .as_ref()
+                .and_then(|cfg| cfg.commit_order.as_deref()),
+            None
+        );
+        assert!(
+            outcome.warnings.iter().any(|w| w.contains("commit_order")),
+            "expected a warning naming commit_order, got {:?}",
+            outcome.warnings
+        );
     }
 
     #[test]
